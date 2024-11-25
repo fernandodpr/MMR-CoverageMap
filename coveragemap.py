@@ -3,6 +3,8 @@ import h3
 
 import geopandas as gpd
 from shapely.geometry import Polygon
+import folium
+from shapely.geometry import mapping
 import matplotlib.pyplot as plt
 from geopy.distance import geodesic
 
@@ -12,14 +14,36 @@ class Plugin(BasePlugin):
 
     def __init__(self):
         super().__init__()
-        # Convertir el string del YAML a una tupla de floats
-        center_point_str = self.config.get("centerpoint", "1,1")
-        self.center_point = tuple(map(float, center_point_str.split(',')))
+        # Obtener configuración del plugin desde el nivel correcto
+        plugin_config = self.config.get("plugins", {}).get("coveragemap", {})
+        self.logger.debug(f"[CONFIG_CONTENT] Contenido del plugin coveragemap: {plugin_config}")
 
-        # Obtener el radio y la resolución con valores por defecto numéricos
-        self.radius_km = float(self.config.get("radius", 50))  # Radio predeterminado: 50 km
-        self.h3_resolution = int(self.config.get("h3_resolution", 10))  # Resolución predeterminada: 10
+        # Obtener el centro desde la configuración, con valor predeterminado
+        center_point_str = self.config.get("centerpoint", "1,-1")
+        try:
+            self.center_point = tuple(map(float, center_point_str.split(',')))
+        except Exception as e:
+            self.logger.error(f"[CONFIG_ERROR] Error al interpretar 'centerpoint': {center_point_str}. Usando valor predeterminado (1.0, 1.0). Error: {e}")
+            self.center_point = (1.0, 1.0)
 
+        # Obtener el radio y la resolución con valores por defecto
+        try:
+            self.radius_km = float(self.config.get("radius", 5))  # Radio predeterminado: 2 km
+        except Exception as e:
+            self.logger.error(f"[CONFIG_ERROR] Error al interpretar 'radius'. Usando valor predeterminado (2). Error: {e}")
+            self.radius_km = 2
+
+        try:
+            self.h3_resolution = int(self.config.get("h3_resolution", 8))  # Resolución predeterminada: 2
+        except Exception as e:
+            self.logger.error(f"[CONFIG_ERROR] Error al interpretar 'h3_resolution'. Usando valor predeterminado (2). Error: {e}")
+            self.h3_resolution = 2
+
+        # Log detallado de la configuración cargada
+        self.logger.info("[CONFIGURATION] Configuración cargada:")
+        self.logger.info(f"  Centro (lat, lon): {self.center_point}")
+        self.logger.info(f"  Radio (km): {self.radius_km}")
+        self.logger.info(f"  Resolución H3: {self.h3_resolution}")
         # Inicializar el mapa
         self.map_data = self.initialize_map()
 
@@ -83,7 +107,7 @@ class Plugin(BasePlugin):
         """
         Maneja los mensajes de Meshtastic y actualiza el mapa si cumplen con las condiciones.
         """
-        return
+        
         # Verificar que el mensaje contenga 'decoded'
         decoded = packet.get("decoded", {})
         if not decoded:
@@ -122,42 +146,99 @@ class Plugin(BasePlugin):
         """
         self.logger.debug(f"Mensaje recibido en la sala {room.room_id}: {full_message}")
 
-        # Verificar si el mensaje contiene "!showmap"
         if "!showmap" in full_message.lower():
-            self.logger.debug("Comando '!showmap' detectado en el mensaje. Generando el mapa.")
+            self.logger.debug("Comando '!showmap' detectado en el mensaje. Generando el mapa interactivo.")
             try:
-                await self.send_map(room.room_id)
+                # Llamada correcta al método
+                self.export_map_as_html()  # Usará la ruta predeterminada ./coveragemap.html
+                self.logger.debug("Mapa interactivo generado correctamente.")
+
+                # Enviar mensaje a Matrix con un enlace al archivo
+                await self.send_matrix_message(
+                    room.room_id,
+                    "El mapa de cobertura se ha generado: [Ver mapa interactivo](file://./coveragemap.html)"
+                )
             except Exception as e:
-                self.logger.error(f"Error al enviar el mapa: {e}")
+                self.logger.error(f"Error al generar o enviar el mapa: {e}")
         else:
             self.logger.debug("Mensaje no reconocido o sin acción.")
 
-
     async def send_map(self, room_id):
         """
-        Genera y envía el mapa actual como imagen a Matrix.
+        Genera el mapa de cobertura como imagen, lo guarda en el sistema y lo envía a Matrix.
         """
-        self.logger.debug("Generando el mapa de cobertura...")
+        self.logger.debug("Iniciando el proceso para generar y enviar el mapa de cobertura.")
+
         try:
-            # Generar el mapa como imagen
+            # Paso 1: Generar el mapa
+            self.logger.debug("Generando la figura del mapa...")
+            self.logger.debug(f"Cantidad de celdas en el mapa: {len(self.map_data)}")
             fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+            self.logger.debug("Figura creada. Dibujando los datos en el mapa...")
             self.map_data.plot(ax=ax, column="coverage", cmap="coolwarm", legend=True)
             plt.title("Mapa de Cobertura")
             plt.xlabel("Longitud")
             plt.ylabel("Latitud")
 
-            # Guardar la imagen
-            image_path = "/tmp/coveragemap.png"
+            # Paso 2: Guardar la imagen
+            image_path = "./coveragemap.png"
+            self.logger.debug(f"Guardando la imagen del mapa en {image_path}...")
             plt.savefig(image_path)
             plt.close()
-            self.logger.debug(f"Mapa de cobertura guardado en {image_path}")
+            self.logger.debug("Imagen guardada correctamente.")
 
-            # Leer y enviar la imagen a Matrix
+            # Paso 3: Enviar la imagen a Matrix
+            self.logger.debug("Leyendo la imagen del sistema para enviarla a Matrix...")
             with open(image_path, "rb") as f:
-                image_bytes = f.read()
-                self.logger.debug("Enviando el mapa a Matrix...")
+                self.logger.debug("Enviando la imagen como mensaje a la sala...")
                 await self.send_matrix_message(
                     room_id, "Mapa de cobertura actualizado. Imagen generada."
                 )
+            self.logger.debug("Mapa enviado correctamente a Matrix.")
+
         except Exception as e:
-            self.logger.error(f"Error al generar o enviar el mapa: {e}")
+            self.logger.error(f"Error durante la generación o envío del mapa: {e}")
+    def export_map_as_html(self, output_path="./coveragemap.html"):
+        """
+        Genera un mapa interactivo con Folium utilizando los datos del plugin y lo guarda como HTML.
+        
+        Args:
+            output_path (str): Ruta del archivo HTML donde se guardará el mapa.
+        """
+        # Depuración de la ruta recibida
+        self.logger.debug(f"[EXPORT_MAP] output_path recibido: {output_path}")
+
+        # Verificar si output_path no es una cadena
+        if not isinstance(output_path, str):
+            self.logger.error(f"[EXPORT_MAP_ERROR] output_path debe ser una cadena. Valor recibido: {output_path}")
+            return
+
+        self.logger.debug("Iniciando la generación del mapa interactivo.")
+        self.logger.debug(f"Centro: {self.center_point}")
+        self.logger.debug(f"Número de hexágonos: {len(self.map_data)}")
+
+        # Crear el mapa interactivo
+        m = folium.Map(location=[self.center_point[0], self.center_point[1]], zoom_start=12)
+
+        # Dibujar hexágonos
+        for _, row in self.map_data.iterrows():
+            polygon = row["geometry"]
+            color = "red" if row["coverage"] else "blue"
+            folium.Polygon(
+                locations=[(point[0], point[1]) for point in mapping(polygon)["coordinates"][0]],
+                color=color,
+                fill=True,
+                fill_opacity=0.5
+            ).add_to(m)
+
+        # Añadir marcador en el centro
+        folium.Marker(
+            location=[self.center_point[0], self.center_point[1]],
+            popup="Center Point",
+            icon=folium.Icon(color="black")
+        ).add_to(m)
+
+        # Guardar el mapa
+        self.logger.debug(f"Guardando el mapa interactivo en {output_path}")
+        m.save(output_path)
+        self.logger.debug("Mapa interactivo generado correctamente.")
